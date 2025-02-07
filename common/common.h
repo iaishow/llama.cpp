@@ -608,6 +608,13 @@ std::string common_detokenize(
         const std::vector<llama_token> & tokens,
                                   bool   special = true);
 
+//==========iaishow add
+int common_tokenized_count(
+    const struct llama_context * ctx,
+           const std::string & text);
+//==========
+
+
 //
 // Chat template utils
 //
