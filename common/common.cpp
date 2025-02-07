@@ -1724,6 +1724,26 @@ std::vector<llama_token> common_tokenize(
     return result;
 }
 
+
+//=====================
+int common_tokenized_count(
+    const struct llama_context * ctx,
+           const std::string & text){
+
+    const llama_model * model = llama_get_model(ctx);
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+    
+    std::vector<llama_token> result(1);
+    int n_tokens = llama_tokenize(vocab, text.data(), text.length(), result.data(), result.size(), false, false);
+    if (n_tokens <0){
+        return -n_tokens;
+    }else{
+        return n_tokens;
+    }
+}
+//=====================
+
+
 std::string common_token_to_piece(const struct llama_context * ctx, llama_token token, bool special) {
     const llama_model * model = llama_get_model(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
