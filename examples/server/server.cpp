@@ -1978,7 +1978,21 @@ struct server_context {
 
         metrics.init();
     }
-
+    //==============iaishow
+    int tokenize_count(const json& json_prompt) const{
+        int cnt=0;
+        if (json_prompt.is_array()) {
+            for (const auto & p : json_prompt) {
+                    auto s = p.template get<std::string>();
+                    cnt += common_tokenized_count(ctx, s);
+            }
+        } else {
+            auto s = json_prompt.template get<std::string>();
+            cnt = common_tokenized_count(ctx, s);
+        }
+        return cnt;
+    }
+    //==================
     server_slot * get_slot_by_id(int id) {
         for (server_slot & slot : slots) {
             if (slot.id == id) {
@@ -4088,6 +4102,26 @@ int main(int argc, char ** argv) {
         res_ok(res, models);
     };
 
+    //=========================iaishow
+    const auto handle_token_count = [&ctx_server, &res_error, &res_ok](const httplib::Request & req, httplib::Response & res) {
+        const json body = json::parse(req.body);
+
+        if (body.count("content") == 0) {
+            res_error(res, format_error_response("\"content\" must be provided", ERROR_TYPE_INVALID_REQUEST));
+            return;
+        }
+
+        const std::string content = body.at("content");
+        int tokens_cnt = ctx_server.tokenize_count(content);
+
+        const json data = {
+            {"count", tokens_cnt}
+        };
+
+        res_ok(res, data);
+    };
+    //=================================
+    
     const auto handle_tokenize = [&ctx_server, &res_ok](const httplib::Request & req, httplib::Response & res) {
         const json body = json::parse(req.body);
 
@@ -4413,6 +4447,10 @@ int main(int argc, char ** argv) {
     svr->Get ("/slots",               handle_slots);
     svr->Post("/slots/:id_slot",      handle_slots_action);
 
+    //====================iaishow added
+    svr->Post("/v1/internal/token-count", handle_token_count);
+    //=========================
+    
     //
     // Start the server
     //
