@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <openssl/aes.h>
+#include <openssl/evp.h>
 
 #define DEFAULT_OAICOMPAT_MODEL "gpt-3.5-turbo"
 
@@ -504,12 +506,118 @@ static bool server_sent_event(httplib::DataSink & sink, const char * event, cons
 //
 // OAI utils
 //
+// Base64 Encode
+static std::string base64Encode(const unsigned char* buffer, int length) {
+    BIO* bio = BIO_new(BIO_f_base64());
+    BIO* bmem = BIO_new(BIO_s_mem());
+    bio = BIO_push(bio, bmem);
+    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+    BIO_write(bio, buffer, length);
+    BIO_flush(bio);
+    
+    BUF_MEM* bptr;
+    BIO_get_mem_ptr(bio, &bptr);
+    std::string encoded(bptr->data, bptr->length);
+    BIO_free_all(bio);
+    return encoded;
+}
+
+// Base64 Decode
+static std::vector<unsigned char> base64Decode(const std::string& encoded) {
+    BIO* bio = BIO_new_mem_buf(encoded.data(), encoded.length());
+    BIO* b64 = BIO_new(BIO_f_base64());
+    bio = BIO_push(b64, bio);
+    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+
+    std::vector<unsigned char> decoded(encoded.length());
+    int len = BIO_read(bio, decoded.data(), encoded.length());
+    decoded.resize(len);
+    BIO_free_all(bio);
+    return decoded;
+}
+
+// AES-256-CBC Encrypt
+static std::string aesEncrypt(const std::string& plaintext) {
+    const std::string key = "12345678901234567890123456789012";
+    const std::string iv = "1234567890123456";
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("Failed to create EVP_CIPHER_CTX");
+    
+    std::vector<unsigned char> ciphertext(plaintext.size() + AES_BLOCK_SIZE);
+    int len = 0, ciphertext_len = 0;
+
+    if (!EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, (const unsigned char*)key.c_str(), (const unsigned char*)iv.c_str())) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("EVP_EncryptInit_ex failed");
+    }
+
+    if (!EVP_EncryptUpdate(ctx, ciphertext.data(), &len, (const unsigned char*)plaintext.data(), plaintext.size())) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("EVP_EncryptUpdate failed");
+    }
+    ciphertext_len = len;
+
+    if (!EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len)) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("EVP_EncryptFinal_ex failed");
+    }
+    ciphertext_len += len;
+    EVP_CIPHER_CTX_free(ctx);
+
+    return base64Encode(ciphertext.data(), ciphertext_len);
+}
+
+// AES-256-CBC Decrypt
+static std::string aesDecrypt(const std::string& encryptedText) {
+    const std::string key = "12345678901234567890123456789012";
+    const std::string iv = "1234567890123456";
+    std::vector<unsigned char> decoded = base64Decode(encryptedText);
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("Failed to create EVP_CIPHER_CTX");
+    
+    std::vector<unsigned char> plaintext(decoded.size());
+    int len = 0, plaintext_len = 0;
+
+    if (!EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, (const unsigned char*)key.c_str(), (const unsigned char*)iv.c_str())) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("EVP_DecryptInit_ex failed");
+    }
+
+    if (!EVP_DecryptUpdate(ctx, plaintext.data(), &len, decoded.data(), decoded.size())) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("EVP_DecryptUpdate failed");
+    }
+    plaintext_len = len;
+
+    if (!EVP_DecryptFinal_ex(ctx, plaintext.data() + len, &len)) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("EVP_DecryptFinal_ex failed");
+    }
+    plaintext_len += len;
+    EVP_CIPHER_CTX_free(ctx);
+
+    return std::string(plaintext.begin(), plaintext.begin() + plaintext_len);
+}
+
+
 
 static json oaicompat_completion_params_parse(const json & body) {
     json llama_params;
 
     if (!body.contains("prompt")) {
         throw std::runtime_error("\"prompt\" is required");
+    }
+
+    const json & prompt = body.at("prompt");
+    if(prompt.is_string()){
+        auto prompt_str = json_value(body, "prompt", std::string());
+        
+        if (prompt_str.rfind("<LosAlamosEncryption>",0) == 0) {
+            prompt_str.erase(0, 21);
+            json& mutableBody = const_cast<json&>(body);
+            mutableBody["need_encrypt"] = true;
+            mutableBody["prompt"] = aesDecrypt(prompt_str);
+        }
     }
 
     // Handle "stop" field

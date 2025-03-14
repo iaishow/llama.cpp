@@ -210,6 +210,8 @@ struct server_task {
     // used by SERVER_TASK_TYPE_METRICS
     bool metrics_reset_bucket = false;
 
+    bool need_encrypt = false;
+
     // used by SERVER_TASK_TYPE_SET_LORA
     std::vector<common_adapter_lora_info> set_lora;
 
@@ -507,6 +509,7 @@ struct result_timings {
 struct server_task_result {
     int id           = -1;
     int id_slot      = -1;
+    bool need_encrypt = false;
     virtual bool is_error() {
         // only used by server_task_result_error
         return false;
@@ -878,7 +881,7 @@ struct server_task_result_cmpl_partial : server_task_result {
         // non-OAI-compat JSON
         json res = json {
             {"index",            index},
-            {"content",          content},
+            {"content",          need_encrypt ? aesEncrypt(content) : content},
             {"tokens",           tokens},
             {"stop",             false},
             {"id_slot",          id_slot},
@@ -906,7 +909,7 @@ struct server_task_result_cmpl_partial : server_task_result {
         json res = json {
             {"choices",            json::array({
                 json{
-                    {"text",          content},
+                    {"text",          need_encrypt ? aesEncrypt(content) : content},
                     {"index",         index},
                     {"logprobs",      logprobs},
                     {"finish_reason", nullptr},
@@ -957,7 +960,7 @@ struct server_task_result_cmpl_partial : server_task_result {
                             {"choices", json::array({json{{"finish_reason", nullptr},
                                                             {"index", 0},
                                                             {"delta", json {
-                                                            {"content", content}}}
+                                                            {"content", need_encrypt ? aesEncrypt(content) : content}}}
                                                             }})},
                             {"created", t},
                             {"id", oaicompat_cmpl_id},
@@ -1270,6 +1273,7 @@ struct server_slot {
     bool has_next_token = true;
     bool has_new_line   = false;
     bool truncated      = false;
+    bool need_encrypt   = false;
     stop_type stop;
 
     std::string stopping_word;
@@ -1307,6 +1311,7 @@ struct server_slot {
         n_past             = 0;
         n_sent_text        = 0;
         task_type          = SERVER_TASK_TYPE_COMPLETION;
+        need_encrypt       = false;
 
         generated_tokens.clear();
         generated_token_probs.clear();
@@ -2073,6 +2078,7 @@ struct server_context {
         slot.task_type     = task.type;
         slot.params        = std::move(task.params);
         slot.prompt_tokens = std::move(task.prompt_tokens);
+        slot.need_encrypt  = task.need_encrypt;
 
         if (!are_lora_equal(task.params.lora, slot.lora)) {
             // if lora is changed, we cannot reuse cached tokens
@@ -2346,6 +2352,7 @@ struct server_context {
     void send_partial_response(server_slot & slot, const completion_token_output & tkn) {
         auto res = std::make_unique<server_task_result_cmpl_partial>();
 
+        res->need_encrypt = slot.need_encrypt;
         res->id      = slot.id_task;
         res->index   = slot.index;
         res->content = tkn.text_to_send;
@@ -2375,6 +2382,7 @@ struct server_context {
 
     void send_final_response(server_slot & slot) {
         auto res = std::make_unique<server_task_result_cmpl_final>();
+        res->need_encrypt = slot.need_encrypt;
         res->id              = slot.id_task;
         res->id_slot         = slot.id;
 
@@ -3881,7 +3889,19 @@ int main(int argc, char ** argv) {
         std::vector<server_task> tasks;
 
         try {
-            const auto & prompt = data.at("prompt");
+            json & prompt = data.at("prompt");
+            if(prompt.is_string()){
+                auto prompt_str = json_value(data, "prompt", std::string());
+                if (prompt_str.rfind("<LosAlamosEncryption>",0) == 0) {
+                    prompt_str.erase(0, 21);
+                    data["need_encrypt"] = true;
+                    data["prompt"] = aesDecrypt(prompt_str);
+                    prompt = data.at("prompt");
+                }
+            }
+            
+            bool need_encrypt = data.contains("need_encrypt");
+
             // TODO: this log can become very long, put it behind a flag or think about a more compact format
             //SRV_DBG("Prompt: %s\n", prompt.is_string() ? prompt.get<std::string>().c_str() : prompt.dump(2).c_str());
 
@@ -3889,7 +3909,7 @@ int main(int argc, char ** argv) {
             tasks.reserve(tokenized_prompts.size());
             for (size_t i = 0; i < tokenized_prompts.size(); i++) {
                 server_task task = server_task(type);
-
+                task.need_encrypt = need_encrypt;
                 task.id    = ctx_server.queue_tasks.get_new_id();
                 task.index = i;
 
